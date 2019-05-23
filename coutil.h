@@ -26,45 +26,103 @@ namespace coutil
 
 	// ----------- //
 
-	// basic_task represents a coroutine that co_returns a (single) value of type T.
-	// if an exception is thrown, it is caught and rethrown upon awaiting the result.
-	// T              - the return type of the coroutine.
-	// InitialSuspend - the type to return for initial_suspend() (empty brace initialized).
-	template<typename T, typename InitialSuspend>
-	class basic_task
+	template<typename, typename> class basic_task;
+
+	namespace detail
 	{
-	public: // -- promise -- //
-
-		static_assert(!std::is_reference_v<T>, "T in basic_task<T> cannot be of reference type");
-
-		struct promise_type;
-		typedef std::experimental::coroutine_handle<promise_type> handle;
-
-		struct promise_type
+		template<typename T, typename InitialSuspend>
+		struct _basic_task_promise_type
 		{
-			// this holds the state information about this coroutine (ret, or exception)
+			// this holds the state information about this coroutine (ret or exception)
 			std::variant<std::exception_ptr, T> stat;
 
-			auto get_return_object() { return basic_task{ handle::from_promise(*this) }; }
+			auto get_return_object() { return basic_task<T, InitialSuspend>{ std::experimental::coroutine_handle<_basic_task_promise_type>::from_promise(*this) }; }
 
 			auto initial_suspend() const noexcept { return InitialSuspend{}; }
 			auto final_suspend() const noexcept { return std::experimental::suspend_always{}; }
 
 			template<typename U>
-			void return_value(U &&u)
-			{
-				stat.emplace<1>(std::forward<U>(u));
-			}
+			void return_value(U &&u) { stat.emplace<1>(std::forward<U>(u)); }
 
-			void unhandled_exception()
-			{
-				stat.emplace<0>(std::current_exception());
-			}
+			void unhandled_exception() { stat.emplace<0>(std::current_exception()); }
 		};
+		template<typename T, typename InitialSuspend>
+		struct _basic_task_promise_type<T&, InitialSuspend>
+		{
+			// this holds the state information about this coroutine (ret or exception)
+			std::variant<std::exception_ptr, T*> stat;
+
+			auto get_return_object() { return basic_task<T&, InitialSuspend>{ std::experimental::coroutine_handle<_basic_task_promise_type>::from_promise(*this) }; }
+
+			auto initial_suspend() const noexcept { return InitialSuspend{}; }
+			auto final_suspend() const noexcept { return std::experimental::suspend_always{}; }
+
+			void return_value(T &p) { stat.emplace<1>(&p); }
+
+			void unhandled_exception() { stat.emplace<0>(std::current_exception()); }
+		};
+		template<typename T, typename InitialSuspend>
+		struct _basic_task_promise_type<T&&, InitialSuspend>
+		{
+			// this holds the state information about this coroutine (ret or exception)
+			std::variant<std::exception_ptr, T*> stat;
+
+			auto get_return_object() { return basic_task<T&, InitialSuspend>{ std::experimental::coroutine_handle<_basic_task_promise_type>::from_promise(*this) }; }
+
+			auto initial_suspend() const noexcept { return InitialSuspend{}; }
+			auto final_suspend() const noexcept { return std::experimental::suspend_always{}; }
+
+			void return_value(T &&p) { stat.emplace<1>(&p); }
+
+			void unhandled_exception() { stat.emplace<0>(std::current_exception()); }
+		};
+		template<typename InitialSuspend>
+		struct _basic_task_promise_type<void, InitialSuspend>
+		{
+			// the exception thrown during coroutine execution (if any)
+			std::exception_ptr ex;
+
+			auto get_return_object() { return basic_task<void, InitialSuspend>{ std::experimental::coroutine_handle<_basic_task_promise_type>::from_promise(*this) }; }
+
+			auto initial_suspend() const noexcept { return InitialSuspend{}; }
+			auto final_suspend() const noexcept { return std::experimental::suspend_always{}; }
+
+			void return_void() {}
+
+			void unhandled_exception() { ex = std::current_exception(); }
+		};
+	}
+
+	// basic_task represents a coroutine that co_returns a (single) value of type T.
+	// if an exception is thrown, it is caught and rethrown upon awaiting the result.
+	// if T is void, this represents a void-returning coroutine.
+	// if T is a reference type, represents a reference-returning coroutine (the reference category is preserved).
+	//     in this case the return value is stored as a pointer - it is the responsibility of the coroutine writer to guarantee the object outlives the coroutine.
+	// otherwise this represents a (regular) T-returning coroutine.
+	// T              - the return type of the coroutine (must not be cv-qualified).
+	// InitialSuspend - the type to return for initial_suspend() (empty brace initialized) (must not be cv-qualified).
+	template<typename T, typename InitialSuspend>
+	class basic_task
+	{
+	public: // -- promise -- //
+
+		static_assert(std::is_same_v<T, std::remove_cv_t<T>>, "T must not be cv-qualified");
+		static_assert(std::is_same_v<InitialSuspend, std::remove_cv_t<InitialSuspend>>, "InitialSuspend must not be cv-qualified");
+
+		typedef detail::_basic_task_promise_type<T, InitialSuspend> promise_type;
+		friend struct promise_type;
+
+	private: // -- private utility info -- //
+
+		typedef std::experimental::coroutine_handle<promise_type> handle;
+
+		// constexpr control flags for performing compile-time branching in management functions
+		static inline constexpr bool void_mode = std::is_void_v<T>;
+		static inline constexpr bool ref_mode = std::is_reference_v<T>;
 
 	private: // -- data -- //
 
-		handle co; // the raw coroutine handle
+		handle co = nullptr; // the raw coroutine handle
 
 	private: // -- private util -- //
 
@@ -97,6 +155,8 @@ namespace coutil
 		// returns true if the basic_task is empty
 		bool operator!() const { return empty(); }
 
+	public: // -- coroutine control -- //
+
 		// returns true if the coroutine has completed execution (successfully or due to exception).
 		// if the basic_task is currently empty, throws bad_coroutine_access.
 		bool done() const
@@ -104,8 +164,6 @@ namespace coutil
 			if (empty()) throw bad_coroutine_access("Accessing empty couroutine manager");
 			return co.done();
 		}
-
-	public: // -- coroutine control -- //
 
 		// if the coroutine is not finished, resumes it, otherwise does nothing.
 		// if the basic_task is currently empty, throws bad_coroutine_access.
@@ -115,128 +173,47 @@ namespace coutil
 			if (!co.done()) co.resume();
 		}
 
-	public: // -- value access -- //
-
 		// blocks until completion of the coroutine and gets the returned value.
 		// if the basic_task is currently empty, throws bad_coroutine_access.
 		// if the coroutine ended due to exception, rethrows the exception.
-		const T &wait() const&
+		// after this operation (regardless of success) the basic_task is in the empty state (the coroutine is destroyed).
+		// T is void      - returns void.
+		// T is reference - returns the reference (preserving reference category).
+		// otherwise      - returns the stored object by value (move-constructed).
+		decltype(auto) wait()
 		{
 			if (empty()) throw bad_coroutine_access("Accessing empty couroutine manager");
 			while (!co.done()) co.resume();
 
-			if (auto ret = std::get_if<1>(&co.promise().stat)) return *ret;
-			else std::rethrow_exception(std::get<0>(co.promise().stat));
-		}
-		T wait() &&
-		{
-			if (empty()) throw bad_coroutine_access("Accessing empty couroutine manager");
-			while (!co.done()) co.resume();
-
-			if (auto ret = std::get_if<1>(&co.promise().stat)) return std::move(*ret);
-			else std::rethrow_exception(std::get<0>(co.promise().stat));
+			// create a sentry object that will set us to the empty state regardless of success (i.e. even if an exception is thrown)
+			struct _
+			{
+				handle &h;
+				_(handle &_h) : h(_h) {}
+				~_() { h.destroy(); h = nullptr; }
+			} sentry(co);
+			
+			if constexpr (void_mode)
+			{
+				if (co.promise().ex) std::rethrow_exception(co.promise().ex);
+			}
+			else if constexpr (ref_mode)
+			{
+				if (std::remove_reference_t<T> **p = std::get_if<1>(&co.promise().stat)) return static_cast<T>(**p); // cast is to preserve rvalue reference return type (otherwise would deduce to lvalue reference)
+				else std::rethrow_exception(std::get<0>(co.promise().stat));
+			}
+			else
+			{
+				if (T *ret = std::get_if<1>(&co.promise().stat)) return static_cast<T>(std::move(*ret)); // the cast is to return a move-constructed value
+				else std::rethrow_exception(std::get<0>(co.promise().stat));
+			}
 		}
 
 	public: // -- await interface -- //
 
-		bool await_ready() { return done(); }
-		void await_suspend(std::experimental::coroutine_handle<>) {}
-		T    await_resume() { return wait(); }
-	};
-	template<typename InitialSuspend>
-	class basic_task<void, InitialSuspend>
-	{
-	public: // -- promise -- //
-
-		struct promise_type;
-		typedef std::experimental::coroutine_handle<promise_type> handle;
-
-		struct promise_type
-		{
-			// the exception thrown during coroutine execution (if any)
-			std::exception_ptr ex;
-
-			basic_task get_return_object() { return basic_task{ handle::from_promise(*this) }; }
-
-			auto initial_suspend() const noexcept { return InitialSuspend{}; }
-			auto final_suspend() const noexcept { return std::experimental::suspend_always{}; }
-
-			void return_void() {}
-
-			void unhandled_exception() { ex = std::current_exception(); }
-		};
-
-	private: // -- data -- //
-
-		handle co; // the raw coroutine handle
-
-	private: // -- private util -- //
-
-		explicit basic_task(handle h) : co(h) {}
-
-	public: // -- ctor / dtor / asgn -- //
-
-		// constructs an empty basic_task (does not refer to the return value of any coroutine)
-		basic_task() = default;
-
-		// destroys the currently-held coroutine handle (if any)
-		~basic_task() { if (co) co.destroy(); }
-
-		basic_task(const basic_task&) = delete;
-		basic_task &operator=(const basic_task&) = delete;
-
-		// steals the handle of other - other is left in the empty state
-		basic_task(basic_task &&other) : co(std::exchange(other.co, nullptr)) {}
-		// discards the current coroutine handle and steals other's - other is left in the empty state.
-		// on self assignment, does nothing.
-		basic_task &operator=(basic_task &&other) { co = std::exchange(other.co, nullptr); return *this; }
-
-	public: // -- state information -- //
-
-		// returns true if the basic_task is currently in the empty state.
-		bool empty() const { return !co; }
-
-		// returns true if the basic_task is non-empty
-		explicit operator bool() const { return !empty(); }
-		// returns true if the basic_task is empty
-		bool operator!() const { return empty(); }
-
-		// returns true if the coroutine has completed execution (successfully or due to exception).
-		// if the basic_task is currently empty, throws bad_coroutine_access.
-		bool done() const
-		{
-			if (empty()) throw bad_coroutine_access("Accessing empty couroutine manager");
-			return co.done();
-		}
-
-	public: // -- coroutine control -- //
-
-		// if the coroutine is not finished, resumes it, otherwise does nothing.
-		// if the basic_task is currently empty, throws bad_coroutine_access.
-		void resume() const
-		{
-			if (empty()) throw bad_coroutine_access("Accessing empty couroutine manager");
-			if (!co.done()) co.resume();
-		}
-
-	public: // -- value access -- //
-
-		// blocks until completion of the coroutine - returns *this.
-		// if the basic_task is currently empty, throws bad_coroutine_access.
-		// if the coroutine ended due to exception, rethrows the exception.
-		void wait() const
-		{
-			if (empty()) throw bad_coroutine_access("Accessing empty couroutine manager");
-			while (!co.done()) co.resume();
-
-			if (co.promise().ex) std::rethrow_exception(co.promise().ex);
-		}
-
-	public: // -- await interface -- //
-
-		bool await_ready() { return done(); }
-		void await_suspend(std::experimental::coroutine_handle<>) {}
-		void await_resume() { wait(); }
+		bool           await_ready() { return done(); }
+		void           await_suspend(std::experimental::coroutine_handle<>) {}
+		decltype(auto) await_resume() { return wait(); }
 	};
 
 	// a task is a basic_task which starts immediately and suspends
@@ -262,13 +239,17 @@ namespace coutil
 	template<typename T>
 	inline constexpr bool is_task_v = is_task<T>::value;
 	
+	// given one or more tasks, resume()s them in a loop until all of them are done().
+	// wait() is not actually called on any task, so the results are not extracted.
 	template<typename ...T, std::enable_if_t<std::conjunction_v<is_task<T>...>, int> = 0>
-	void wait_all(const T &...tasks)
+	void wait_all(T &...tasks)
 	{
 		while ((... | (tasks.resume(), !tasks.done())));
 	}
+	// given one or more tasks, resume()s them in a loop until at least one of them is done().
+	// wait() is not actually called on any task, so the results are not extracted.
 	template<typename ...T, std::enable_if_t<std::conjunction_v<is_task<T>...>, int> = 0>
-	void wait_any(const T &...tasks)
+	void wait_any(T &...tasks)
 	{
 		while (!(... | (tasks.resume(), tasks.done())));
 	}
@@ -324,7 +305,7 @@ namespace coutil
 
 	private: // -- data -- //
 
-		handle co; // the raw coroutine handle
+		handle co = nullptr; // the raw coroutine handle
 
 	private: // -- private util -- //
 

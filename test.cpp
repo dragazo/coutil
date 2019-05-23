@@ -38,6 +38,37 @@ int main() try
 	static_assert(std::is_same_v<lazy_task<void>, lazy_task<const volatile void>>);
 
 	{
+		task<> a;
+		task<int> b;
+		task<float&> c;
+		task<double&&> d;
+
+		assert(a.empty() && !a && !static_cast<bool>(a));
+		assert(b.empty() && !b && !static_cast<bool>(b));
+		assert(c.empty() && !c && !static_cast<bool>(c));
+		assert(d.empty() && !d && !static_cast<bool>(d));
+
+		static_assert(std::is_same_v<void, decltype(a.wait())>);
+		static_assert(std::is_same_v<void, decltype(std::move(a).wait())>);
+		static_assert(std::is_same_v<void, decltype(a.await_resume())>);
+		static_assert(std::is_same_v<void, decltype(std::move(a).await_resume())>);
+
+		static_assert(std::is_same_v<int, decltype(b.wait())>);
+		static_assert(std::is_same_v<int, decltype(std::move(b).wait())>);
+		static_assert(std::is_same_v<int, decltype(b.await_resume())>);
+		static_assert(std::is_same_v<int, decltype(std::move(b).await_resume())>);
+		
+		static_assert(std::is_same_v<float&, decltype(c.wait())>);
+		static_assert(std::is_same_v<float&, decltype(std::move(c).wait())>);
+		static_assert(std::is_same_v<float&, decltype(c.await_resume())>);
+		static_assert(std::is_same_v<float&, decltype(std::move(c).await_resume())>);
+
+		static_assert(std::is_same_v<double&&, decltype(d.wait())>);
+		static_assert(std::is_same_v<double&&, decltype(std::move(d).wait())>);
+		static_assert(std::is_same_v<double&&, decltype(d.await_resume())>);
+		static_assert(std::is_same_v<double&&, decltype(std::move(d).await_resume())>);
+	}
+	{
 		int val = 0;
 		auto a = [&]() -> task<>
 		{
@@ -75,16 +106,16 @@ int main() try
 	{
 		int p = 4;
 		task<> co = [](int &p) -> task<> { p = 44; co_return; }(p);
-		assert(co.done() && p == 44);
+		assert(!co.empty() && static_cast<bool>(co) && !!co && co.done() && p == 44);
 		co.wait();
-		assert(co.done() && p == 44);
+		assert(co.empty() && !static_cast<bool>(co) && !co && p == 44);
 	}
 	{
 		int p = 6;
 		lazy_task<> co = [](int &p) -> lazy_task<> { p = 77; co_return; }(p);
-		assert(!co.done() && p == 6);
+		assert(!co.empty() && static_cast<bool>(co) && !!co && !co.done() && p == 6);
 		co.wait();
-		assert(co.done() && p == 77);
+		assert(co.empty() && !static_cast<bool>(co) && !co && p == 77);
 	}
 
 	assert([](int a, int b) -> task<int> { co_return a + b; }(6, 7).wait() == 13);
